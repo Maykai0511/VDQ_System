@@ -1,0 +1,13 @@
+# IDE
+.idea/
+*.iml
+.vscode/
+.DS_Store
+
+# 依赖
+node_modules/
+vendor/
+
+# 环境变量
+.env
+.env.local
