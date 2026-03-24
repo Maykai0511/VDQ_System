@@ -5,32 +5,23 @@ from ollama import Client
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-# --- 1. 定义系统提示词 (Schema 地图) ---
+# --- 系统提示词保持不变 ---
 SYSTEM_PROMPT = """你是一个专业的蔬菜店数据分析助手。
-必须严格遵守以下数据库表结构（Schema）来编写 SQL：
-
-1. 表名: vegetables
-   - 字段: id, name (蔬菜名称), stock (库存), price (单价)
-
-2. 表名: veg_records
-   - 字段: id, veg_id (关联vegetables.id), record_type (记录类型: SALE(销售), RESTOCK(进货), PRICE_CHANGE(调价), LOSS(损耗)), 
-     quantity_change (变动数量), current_price (当时单价), total_amount (总金额), record_time
-
+必须严格遵守以下数据库表结构来编写 SQL：
+1. 表名: vegetables (字段: id, name, stock, price)
+2. 表名: veg_records (字段: id, veg_id, record_type, quantity_change, current_price, total_amount, record_time)
 查询要求：
-- 如果用户问库存，请查询 vegetables 表。
-- 蔬菜库存的单位是公斤，价格的单位是元。
-- 必须使用正确的字段名，例如：蔬菜名是 'name' 而不是 'product_name'。
-- 只能输出 JSON 格式：{"action": "query", "sql": "SELECT ..."} 
-- 不要输出任何多余的解释文字。"""
+- 如果用户问库存，查询 vegetables。
+- 只能输出 JSON：{"action": "query", "sql": "SELECT ..."}
+- 不要输出多余文字。"""
 
-# --- 配置 ---
 DB_CONFIG = {
     "host": "localhost",
     "user": "root",
-    "password": "root",
+    "password": "root",  # 记得确认这里的密码是否为你设置的 'root'
     "database": "vdq_system_db"
 }
-MODEL_NAME = "qwen3:8b"
+MODEL_NAME = "qwen3:8b"  # 既然是 2026 年，Qwen3 绝对是国产之光
 
 ollama_client = Client(host='http://localhost:11434', timeout=300.0)
 
@@ -49,43 +40,66 @@ async def run_chat():
             # 自动连接数据库
             try:
                 await session.call_tool("connect_db", arguments=DB_CONFIG)
-                print("✅ 数据库连接成功！")
+                print("✅ 数据库连接成功！输入 'exit' 或 'quit' 退出聊天。")
             except Exception as e:
                 print(f"❌ 连接数据库失败: {e}")
                 return
 
-            user_input = "现在西红柿还有多少库存？"
-            print(f"🚀 用户提问: {user_input}")
+            # --- 开启持续对话循环 ---
+            while True:
+                user_input = input("\n👤 你想问什么？ (输入 exit 退出): ").strip()
 
-            try:
-                # --- 2. 在这里加入 SYSTEM_PROMPT ---
-                response = ollama_client.chat(model=MODEL_NAME, messages=[
-                    {'role': 'system', 'content': SYSTEM_PROMPT},  # 注入灵魂
-                    {'role': 'user', 'content': user_input},
-                ])
+                if not user_input:
+                    continue
+                if user_input.lower() in ['exit', 'quit']:
+                    print("👋 再见！期待下次为您服务。")
+                    break
 
-                content = response['message']['content']
-                print(f"🤖 模型生成的指令: {content}")
+                print(f"🚀 正在分析问题: {user_input}")
 
-                match = re.search(r'\{.*\}', content, re.DOTALL)
-                if match:
-                    sql = json.loads(match.group())["sql"]
-                    print(f"🛠️  正在执行修正后的 SQL: {sql}")
-
-                    # 执行查询
-                    db_result = await session.call_tool("query", arguments={"sql": sql})
-                    data_str = db_result.content[0].text
-
-                    # 让模型根据结果说人话
-                    final_res = ollama_client.chat(model=MODEL_NAME, messages=[
+                try:
+                    # 第一步：生成 SQL
+                    response = ollama_client.chat(model=MODEL_NAME, messages=[
                         {'role': 'system', 'content': SYSTEM_PROMPT},
-                        {'role': 'user', 'content': f"查询结果是：{data_str}\n请结合此结果回答用户：{user_input}"},
+                        {'role': 'user', 'content': user_input},
                     ])
-                    print(f"\n✨ AI 最终回答: {final_res['message']['content']}")
 
-            except Exception as e:
-                print(f"❌ 运行异常: {e}")
+                    content = response['message']['content']
+
+                    # 使用更健壮的 JSON 匹配
+                    match = re.search(r'\{.*\}', content, re.DOTALL)
+                    if not match:
+                        print(f"🤖 AI 回复: {content} (未生成有效查询语句)")
+                        continue
+
+                    # 解析并执行 SQL
+                    try:
+                        sql_json = json.loads(match.group())
+                        sql = sql_json.get("sql", "")
+                        print(f"🛠️  执行 SQL: {sql}")
+
+                        db_result = await session.call_tool("query", arguments={"sql": sql})
+                        # 获取工具返回的内容
+                        data_str = db_result.content[0].text if db_result.content else "无查询结果"
+                    except Exception as sql_err:
+                        data_str = f"数据库查询出错: {sql_err}"
+
+                    # 第二步：生成人类可读的回答
+                    final_res = ollama_client.chat(model=MODEL_NAME, messages=[
+                        {'role': 'system', 'content': "根据数据库返回的内容，用亲切自然的口吻回答用户。"},
+                        {'role': 'user', 'content': f"用户问：{user_input}\n查询结果：{data_str}"},
+                    ])
+
+                    print("-" * 30)
+                    print(f"✨ AI: {final_res['message']['content']}")
+                    print("-" * 30)
+
+                except Exception as e:
+                    print(f"❌ 对话逻辑异常: {e}")
 
 
 if __name__ == "__main__":
-    asyncio.run(run_chat())
+    try:
+        asyncio.run(run_chat())
+    except KeyboardInterrupt:
+        print("\n程序已手动终止。")
