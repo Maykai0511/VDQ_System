@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>VDQ 智能蔬菜管理系统 2026</title>
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+    <style>
+        body { margin:0; display:flex; height:100vh; background:#0f172a; color:#fff; font-family:sans-serif; }
+        #left-panel { flex:7; padding:20px; display:flex; flex-direction:column; gap:20px; }
+        #right-panel { flex:3; background:#1e293b; display:flex; flex-direction:column; border-left:1px solid #334155; }
+        .chart-card { background:#1e293b; border-radius:12px; padding:15px; flex:1; min-height:350px; }
+        #chat-box { flex:1; overflow-y:auto; padding:15px; display:flex; flex-direction:column; }
+        .msg { margin:10px 0; padding:10px; border-radius:8px; width:fit-content; max-width:85%; line-height: 1.5; }
+        .user { background:#3b82f6; align-self: flex-end; }
+        .ai { background:#475569; align-self: flex-start; }
+        .system { background: #6366f1; font-size: 0.8em; align-self: center; opacity: 0.8; }
+        .input-area { padding:15px; display:flex; gap:10px; background:#0f172a; }
+        input { flex:1; padding:10px; border-radius:4px; border:none; outline: none; }
+        button { padding:10px 20px; background:#10b981; color:#fff; border:none; cursor:pointer; border-radius:4px; font-weight: bold; }
+        button:hover { background:#059669; }
+    </style>
+</head>
+<body>
+
+<div id="left-panel">
+    <div id="live-card" class="chart-card" style="display:none;">
+        <h3 id="live-title">📡 实时数据监控流</h3>
+        <div id="live-chart" style="width:100%; height:300px;"></div>
+    </div>
+    <div id="trend-card" class="chart-card" style="display:none;">
+        <h3>📈 历史趋势深度分析</h3>
+        <div id="trend-chart" style="width:100%; height:300px;"></div>
+    </div>
+</div>
+
+<div id="right-panel">
+    <div id="chat-box"></div>
+    <div class="input-area">
+        <input type="text" id="user-input" placeholder="输入指令，如'开启实时库存监控'..." onkeypress="if(event.keyCode==13) send()">
+        <button onclick="send()">发送</button>
+    </div>
+</div>
+
+<script>
+    // 初始化图表实例
+    let liveChart = echarts.init(document.getElementById('live-chart'), 'dark');
+    let trendChart = echarts.init(document.getElementById('trend-chart'), 'dark');
+    let ws = null;
+    let chatHistory = [];
+
+    // --- 核心发送函数 ---
+    async function send() {
+        const input = document.getElementById('user-input');
+        const msg = input.value.trim();
+        if(!msg) return;
+
+        appendMsg('user', msg);
+        input.value = '';
+
+        console.log("📤 正在向后端发送询问...");
+
+        try {
+            const res = await axios.post('http://localhost:8000/chat', {
+                message: msg,
+                history: chatHistory
+            });
+
+            console.log("📥 后端原始返回:", res.data);
+            const data = res.data;
+
+            // 显示 AI 文字回答
+            if(data.answer) {
+                appendMsg('ai', data.answer);
+                chatHistory.push({role: 'user', content: msg}, {role: 'assistant', content: data.answer});
+            }
+
+            // 1. 处理：按需开启实时监控
+            if(data.action === 'start_monitor') {
+                console.log("⚡ 触发监控指令，维度:", data.dimension);
+                document.getElementById('live-card').style.display = 'block';
+                // 必须在容器显示后 resize，否则图表可能显示不全
+                setTimeout(() => { liveChart.resize(); }, 100);
+                startWebSocket(data.dimension || 'stock');
+            }
+
+            // 2. 处理：显示静态趋势图
+            if(data.action === 'show_trend' && data.chart_data && data.chart_data.length > 0) {
+                console.log("📊 触发趋势图，数据条数:", data.chart_data.length);
+                document.getElementById('trend-card').style.display = 'block';
+                setTimeout(() => { trendChart.resize(); }, 100);
+                renderTrend(data.chart_data);
+            }
+
+        } catch(e) {
+            console.error("❌ 请求出错:", e);
+            appendMsg('ai', '抱歉，无法连接到系统后台，请检查 uvicorn 是否正常运行。');
+        }
+    }
+
+    // --- WebSocket 实时流处理 ---
+    function startWebSocket(dim) {
+        if(ws) {
+            console.log("🔌 正在关闭旧监控连接...");
+            ws.close();
+        }
+
+        const url = `ws://localhost:8000/ws/stats/${dim}`;
+        console.log("🌐 正在连接 WebSocket:", url);
+
+        ws = new WebSocket(url);
+
+        ws.onopen = () => {
+            appendMsg('system', `[系统] 已成功接入${dim === 'stock' ? '库存' : '价格'}实时监控流`);
+        };
+
+        ws.onmessage = (e) => {
+            const list = JSON.parse(e.data);
+            // 实时更新图表
+            liveChart.setOption({
+                tooltip: { trigger: 'axis' },
+                xAxis: { type: 'category', data: list.map(i => i.name) },
+                yAxis: { type: 'value', name: dim === 'stock' ? '库存量' : '单价(元)' },
+                series: [{
+                    name: dim === 'stock' ? '当前库存' : '当前价格',
+                    type: 'bar',
+                    data: list.map(i => i.val),
+                    label: { show: true, position: 'top', color: '#fff' },
+                    itemStyle: {
+                        color: dim === 'stock' ? '#10b981' : '#f59e0b',
+                        borderRadius: [4, 4, 0, 0]
+                    }
+                }]
+            });
+        };
+
+        ws.onclose = () => { console.log("🔌 WebSocket 连接已断开"); };
+    }
+
+    // --- 静态趋势图渲染 ---
+    function renderTrend(data) {
+        trendChart.setOption({
+            tooltip: { trigger: 'axis' },
+            grid: { bottom: '15%' },
+            xAxis: {
+                type: 'category',
+                data: data.map(i => i.time),
+                axisLabel: { rotate: 30 }
+            },
+            yAxis: { type: 'value' },
+            series: [{
+                name: '数值',
+                type: 'line',
+                data: data.map(i => i.value),
+                smooth: true,
+                symbolSize: 8,
+                label: { show: true, position: 'top' },
+                lineStyle: { width: 3, color: '#3b82f6' },
+                areaStyle: {
+                    color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+                        { offset: 0, color: 'rgba(59, 130, 246, 0.5)' },
+                        { offset: 1, color: 'rgba(59, 130, 246, 0)' }
+                    ])
+                }
+            }]
+        });
+    }
+
+    // --- 聊天气泡添加 ---
+    function appendMsg(role, text) {
+        const box = document.getElementById('chat-box');
+        const d = document.createElement('div');
+        d.className = `msg ${role}`;
+        d.innerText = text;
+        box.appendChild(d);
+        // 自动滚动到底部
+        box.scrollTop = box.scrollHeight;
+    }
+
+    // 监听窗口大小变化
+    window.onresize = function() {
+        liveChart.resize();
+        trendChart.resize();
+    };
+</script>
+</body>
+</html>
